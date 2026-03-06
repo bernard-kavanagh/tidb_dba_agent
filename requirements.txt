@@ -1,0 +1,26 @@
+streamlit>=1.30.0
+mysql-connector-python>=8.3.0
+faker>=18.0.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+
+# LangChain core
+langchain>=0.3.0
+langchain-core>=0.3.0
+langgraph>=0.2.0
+
+# Anthropic Claude
+langchain-anthropic>=0.3.0
+
+# TiDB Vector Store (via langchain-community)
+tidb-vector>=0.0.9
+sqlalchemy>=2.0.0
+pymysql>=1.1.0
+
+# Embeddings (local, HuggingFace)
+sentence-transformers>=2.2.0
+langchain-community>=0.3.0
+
+# Visualisation
+plotly>=5.0.0
+pandas>=2.0.0
