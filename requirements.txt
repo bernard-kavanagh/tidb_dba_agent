@@ -9,8 +9,10 @@ langchain>=0.3.0
 langchain-core>=0.3.0
 langgraph>=0.2.0
 
-# Anthropic Claude
-langchain-anthropic>=0.3.0
+# LLM providers — install the one matching your LLM_PROVIDER in .env
+langchain-anthropic>=0.3.0        # LLM_PROVIDER=anthropic  (default)
+# langchain-openai>=0.2.0         # LLM_PROVIDER=openai   → pip install langchain-openai
+# langchain-google-genai>=2.0.0   # LLM_PROVIDER=gemini   → pip install langchain-google-genai
 
 # TiDB Vector Store (via langchain-community)
 tidb-vector>=0.0.9

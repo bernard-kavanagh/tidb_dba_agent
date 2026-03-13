@@ -1,11 +1,16 @@
 """
-DBA Agent — LangGraph + Claude + Streamlit
-------------------------------------------
-Safety-First Autonomous DBA powered by:
-  • Claude claude-sonnet-4-6 (Anthropic) as the reasoning LLM
+DBA Agent — LangGraph + Streamlit  (LLM-agnostic)
+--------------------------------------------------
+Self-Healing Database Substrate powered by:
+  • Pluggable LLM backend — Claude (Anthropic), GPT-4o (OpenAI), or Gemini (Google)
   • LangGraph create_react_agent for the tool-calling loop
   • TiDBVectorStore (via memory.py) for episodic recall
   • TiDB Cloud Branching (via tools.py) for safe DDL sandboxing
+
+Set LLM_PROVIDER in .env to switch models:
+  LLM_PROVIDER=anthropic   →  ChatAnthropic  (default)
+  LLM_PROVIDER=openai      →  ChatOpenAI
+  LLM_PROVIDER=gemini      →  ChatGoogleGenerativeAI
 
 Run:  streamlit run agent.py
 """
@@ -17,7 +22,6 @@ import pandas as pd
 import plotly.graph_objects as go
 from pathlib import Path
 from dotenv import load_dotenv
-from langchain_anthropic import ChatAnthropic
 from langgraph.prebuilt import create_react_agent
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
 
@@ -141,16 +145,70 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+# ── LLM factory ───────────────────────────────────────────────────────────────
+
+def _build_llm():
+    """
+    Returns a LangChain chat model based on LLM_PROVIDER in .env.
+
+    Supported providers:
+        anthropic  →  ChatAnthropic        (default)
+        openai     →  ChatOpenAI
+        gemini     →  ChatGoogleGenerativeAI
+    """
+    provider = os.getenv("LLM_PROVIDER", "anthropic").lower().strip()
+
+    if provider == "anthropic":
+        from langchain_anthropic import ChatAnthropic
+        return ChatAnthropic(
+            model=os.getenv("CLAUDE_MODEL", "claude-sonnet-4-5"),
+            api_key=os.getenv("ANTHROPIC_API_KEY"),
+            temperature=0,
+        )
+
+    elif provider == "openai":
+        # pip install langchain-openai
+        try:
+            from langchain_openai import ChatOpenAI
+        except ImportError:
+            raise ImportError(
+                "langchain-openai is required for LLM_PROVIDER=openai. "
+                "Run: pip install langchain-openai"
+            )
+        return ChatOpenAI(
+            model=os.getenv("OPENAI_MODEL", "gpt-4o"),
+            api_key=os.getenv("OPENAI_API_KEY"),
+            temperature=0,
+        )
+
+    elif provider == "gemini":
+        # pip install langchain-google-genai
+        try:
+            from langchain_google_genai import ChatGoogleGenerativeAI
+        except ImportError:
+            raise ImportError(
+                "langchain-google-genai is required for LLM_PROVIDER=gemini. "
+                "Run: pip install langchain-google-genai"
+            )
+        return ChatGoogleGenerativeAI(
+            model=os.getenv("GEMINI_MODEL", "gemini-1.5-pro"),
+            google_api_key=os.getenv("GOOGLE_API_KEY"),
+            temperature=0,
+        )
+
+    else:
+        raise ValueError(
+            f"Unknown LLM_PROVIDER='{provider}'. "
+            "Choose one of: anthropic, openai, gemini"
+        )
+
+
 # ── LLM + Agent setup (cached so it doesn't reload on every rerun) ────────────
 
 @st.cache_resource
 def build_agent():
-    """Initialise the LangGraph ReAct agent with Claude and all DBA tools."""
-    llm = ChatAnthropic(
-        model=os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6"),
-        api_key=os.getenv("ANTHROPIC_API_KEY"),
-        temperature=0,
-    )
+    """Initialise the LangGraph ReAct agent with the configured LLM and all DBA tools."""
+    llm = _build_llm()
 
     system_prompt = Path("agent_context.md").read_text()
 
@@ -175,8 +233,10 @@ if "run_diagnostic" not in st.session_state:
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.markdown("## 🛡️ DBA Agent")
-    st.markdown("**Safety-First Autonomous DBA**  \nPowered by TiDB + Claude")
+    provider = os.getenv("LLM_PROVIDER", "anthropic").lower()
+    provider_label = {"anthropic": "Claude", "openai": "GPT-4o", "gemini": "Gemini"}.get(provider, provider.title())
+    st.markdown("## 🧬 Self-Healing Database Substrate")
+    st.markdown(f"**Autonomous DBA**  \nPowered by TiDB + {provider_label}")
     st.divider()
 
     # Connection status
@@ -206,13 +266,18 @@ with st.sidebar:
     st.divider()
     st.markdown("### 🔧 Tools Available")
     tool_names = {
-        "🔍 explain_query":        "EXPLAIN ANALYZE on production",
-        "🌿 create_branch":        "Spawn a safety sandbox",
-        "🗑️ delete_branch":        "Clean up branches",
-        "⚡ apply_ddl_on_branch":  "DDL on branch only",
-        "▶️ run_query_on_branch":  "Measure post-fix performance",
-        "🧠 recall_memory":        "Search past incidents",
-        "💾 save_memory":          "Persist resolved fixes",
+        "🔍 explain_query":          "EXPLAIN ANALYZE on production",
+        "🌿 create_branch":          "Spawn a safety sandbox",
+        "📋 list_branches":          "Show all branches",
+        "🗑️ delete_branch":          "Delete branch by ID",
+        "🗑️ delete_branch_by_name":  "Delete branch by name",
+        "⚡ apply_ddl_on_branch":    "DDL on branch only",
+        "▶️ run_query_on_branch":    "Measure post-fix performance",
+        "🔥 check_write_hotspots":   "Scan for AUTO_INCREMENT / monotonic index risks",
+        "🗺️ check_table_regions":    "Inspect TiKV region distribution",
+        "🐢 check_slow_queries":     "Query the slow query log",
+        "🧠 recall_memory":          "Search past incidents",
+        "💾 save_memory":            "Persist resolved fixes",
     }
     for name, desc in tool_names.items():
         st.markdown(f"**{name}** — {desc}")
@@ -285,18 +350,173 @@ def _render_recall_output(data):
         st.dataframe(df, use_container_width=True, hide_index=True)
 
 
+def _render_list_branches_output(data: dict, key_prefix: str = ""):
+    """Render branch list as a table with a Delete button on each row."""
+    if "error" in data:
+        st.error(data["error"])
+        return
+
+    branches = data.get("branches", [])
+    if not branches:
+        st.info("No branches found on the cluster.")
+        return
+
+    count = data.get("count", len(branches))
+    st.markdown(f"**{count} branch{'es' if count != 1 else ''} on the cluster:**")
+
+    # Header row
+    h1, h2, h3, h4 = st.columns([3, 2, 3, 2])
+    h1.markdown("**Name**"); h2.markdown("**State**")
+    h3.markdown("**Created**"); h4.markdown("**Action**")
+
+    for i, branch in enumerate(branches):
+        bid   = branch.get("branch_id", "")
+        name  = branch.get("name", "(unnamed)")
+        state = branch.get("state", "")
+        created = branch.get("created_at", "")[:19] if branch.get("created_at") else "—"
+
+        c1, c2, c3, c4 = st.columns([3, 2, 3, 2])
+        c1.code(name, language=None)
+        badge = "badge-safe" if state in ("ACTIVE", "READY") else "badge-warn"
+        c2.markdown(f'<span class="{badge}">✅ {state}</span>', unsafe_allow_html=True)
+        c3.markdown(created)
+
+        with c4:
+            btn_key = f"{key_prefix}_del_{i}_{bid}"
+            if st.button("🗑️ Delete", key=btn_key, type="secondary"):
+                from tools import delete_branch_by_name as _del_by_name
+                result = json.loads(_del_by_name.invoke({"branch_name": name}))
+                if result.get("success"):
+                    st.success(f"Deleted '{name}'")
+                    # Clear active_branch if it was this one
+                    ab = st.session_state.get("active_branch") or {}
+                    if ab.get("branch_id") == bid:
+                        st.session_state.active_branch = None
+                    st.rerun()
+                else:
+                    st.error(result.get("message", "Delete failed."))
+
+
+def _render_write_hotspots_output(data: dict):
+    """Rich output for check_write_hotspots."""
+    if "error" in data:
+        st.error(data["error"])
+        return
+
+    severity = data.get("severity", "LOW")
+    badge_class = {"HIGH": "badge-error", "MEDIUM": "badge-warn", "LOW": "badge-safe"}.get(severity, "badge-safe")
+    st.markdown(f'<span class="{badge_class}">Severity: {severity}</span>', unsafe_allow_html=True)
+    st.markdown(f"**{data.get('summary', '')}**")
+
+    ai_pks = data.get("auto_increment_pks", [])
+    if ai_pks:
+        st.markdown("#### ⚠️ AUTO_INCREMENT Primary Keys (Write Hotspot Risk)")
+        st.markdown(f"*Fix: {data.get('fix', '')}*")
+        df = pd.DataFrame(ai_pks)
+        df.columns = [c.replace("TABLE_", "").title() for c in df.columns]
+        st.dataframe(df, use_container_width=True, hide_index=True)
+    else:
+        st.success("✅ No AUTO_INCREMENT primary keys found.")
+
+    mono = data.get("monotonic_indexes", [])
+    if mono:
+        st.markdown("#### ⚠️ Monotonically Increasing Indexed Columns (Index Hotspot Risk)")
+        df2 = pd.DataFrame(mono)
+        df2.columns = [c.replace("TABLE_", "").title() for c in df2.columns]
+        st.dataframe(df2, use_container_width=True, hide_index=True)
+    else:
+        st.success("✅ No monotonic index hotspot risks found.")
+
+
+def _render_table_regions_output(data: dict):
+    """Rich output for check_table_regions."""
+    if "error" in data:
+        st.error(data["error"])
+        return
+
+    hotspot = data.get("hotspot_detected", False)
+    badge = "badge-error" if hotspot else "badge-safe"
+    label = "⚠️ HOTSPOT DETECTED" if hotspot else "✅ No Hotspot"
+    st.markdown(f'<span class="{badge}">{label}</span>', unsafe_allow_html=True)
+    st.markdown(data.get("summary", ""))
+
+    col_a, col_b = st.columns(2)
+    col_a.metric("Regions", data.get("region_count", 0))
+    col_b.metric("Total Written Bytes", f"{data.get('total_written_bytes', 0):,}")
+
+    regions = data.get("regions", [])
+    if regions:
+        df = pd.DataFrame(regions)
+        df = df.sort_values("written_bytes", ascending=False)
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+
+def _render_slow_queries_output(data: dict):
+    """Rich output for check_slow_queries."""
+    if "error" in data:
+        st.error(data["error"])
+        return
+    if "message" in data:
+        st.success(data["message"])
+        return
+
+    count = data.get("count", 0)
+    threshold = data.get("threshold_seconds", 1.0)
+    st.markdown(f"**{count} slow queries** exceeding `{threshold}s`:")
+
+    rows = data.get("slow_queries", [])
+    if rows:
+        df = pd.DataFrame(rows)
+        df = df.rename(columns={
+            "query_time_s": "Time (s)",
+            "db": "DB",
+            "query": "Query",
+            "rows_examined": "Rows Examined",
+            "index_names": "Indexes",
+            "user": "User",
+            "start_time": "Start Time",
+        })
+        # Colour-code by query time
+        st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Time (s)": st.column_config.NumberColumn(format="%.3f s"),
+                "Rows Examined": st.column_config.NumberColumn(format="%d"),
+                "Query": st.column_config.TextColumn(width="large"),
+            },
+        )
+
+
 def render_tool_call(tool_name: str, tool_input: dict, tool_output: str):
     """Renders a single tool invocation as a collapsible expander."""
     icon_map = {
-        "explain_query": "🔍",
-        "create_branch": "🌿",
-        "delete_branch": "🗑️",
-        "apply_ddl_on_branch": "⚡",
-        "run_query_on_branch": "▶️",
-        "recall_memory": "🧠",
-        "save_memory": "💾",
+        "explain_query":         "🔍",
+        "create_branch":         "🌿",
+        "list_branches":         "📋",
+        "delete_branch":         "🗑️",
+        "delete_branch_by_name": "🗑️",
+        "apply_ddl_on_branch":   "⚡",
+        "run_query_on_branch":   "▶️",
+        "check_write_hotspots":  "🔥",
+        "check_table_regions":   "🗺️",
+        "check_slow_queries":    "🐢",
+        "recall_memory":         "🧠",
+        "save_memory":           "💾",
     }
     icon = icon_map.get(tool_name, "🔧")
+    # list_branches gets its own full-width expander (no side-by-side layout)
+    if tool_name == "list_branches":
+        with st.expander(f"{icon} `{tool_name}`", expanded=True):
+            try:
+                parsed = json.loads(tool_output)
+                key_prefix = str(abs(hash(tool_output)))[:8]
+                _render_list_branches_output(parsed, key_prefix=key_prefix)
+            except Exception:
+                st.code(tool_output[:1000])
+        return
+
     with st.expander(f"{icon} `{tool_name}`", expanded=False):
         col1, col2 = st.columns(2)
         with col1:
@@ -310,6 +530,12 @@ def render_tool_call(tool_name: str, tool_input: dict, tool_output: str):
                     _render_explain_output(parsed)
                 elif tool_name == "recall_memory":
                     _render_recall_output(parsed)
+                elif tool_name == "check_write_hotspots":
+                    _render_write_hotspots_output(parsed)
+                elif tool_name == "check_table_regions":
+                    _render_table_regions_output(parsed)
+                elif tool_name == "check_slow_queries":
+                    _render_slow_queries_output(parsed)
                 else:
                     st.code(json.dumps(parsed, indent=2), language="json")
             except Exception:

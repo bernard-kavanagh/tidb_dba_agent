@@ -1,22 +1,38 @@
-# Safety-First DBA Agent
+# 🧬 Self-Healing Database Substrate
 
-An autonomous Database Administrator that **never experiments on production**. Every proposed fix is validated in a TiDB Cloud branch before you're asked to approve it.
+> *"The database that fixes itself — safely, transparently, and with your approval."*
 
-Built with **Claude Sonnet 4.6** · **LangGraph** · **Streamlit** · **TiDB Cloud** · **Plotly**
+An autonomous DBA agent that detects performance degradation, proposes and validates fixes in an isolated sandbox, and waits for your sign-off before touching production. Every action is explainable. Every fix is reversible. LLM-agnostic.
+
+Built with **Claude / OpenAI / Gemini** · **LangGraph** · **Streamlit** · **TiDB Cloud** · **Plotly**
+
+---
+
+## What is a Self-Healing Database Substrate?
+
+Traditional databases are passive — they accumulate technical debt silently until a human notices a slow query, a hotspot alert, or a 3am page. This project inverts that model.
+
+The **substrate** is the combination of:
+- A **live production database** (TiDB Cloud Serverless) that serves real traffic
+- A **copy-on-write branching layer** (TiDB Cloud Branches) for zero-risk sandboxing — every fix is proven before it touches production
+- An **LLM-powered reasoning agent** (LangGraph ReAct loop) that observes, hypothesises, and validates
+- A **vector episodic memory** (TiDB Vector Store) that learns from every past incident
+
+Together they form a system that continuously monitors itself, proposes targeted structural improvements, benchmarks them safely, and self-heals — without ever modifying production until a human says yes.
 
 ---
 
 ## How it works
 
 **Prompted mode** — describe an issue in the chat:
-1. **Triage** — You describe a slow query or performance issue
-2. **Recall** — The agent searches its vector memory for similar past incidents
-3. **Sandbox** — A TiDB Cloud branch (copy-on-write snapshot of production) is created
-4. **Fix & Verify** — The proposed DDL (`CREATE INDEX`, `ALTER TABLE`, etc.) is applied to the branch and benchmarked
-5. **Report** — The agent presents before/after metrics and waits for your approval before touching production
+1. **Triage** — you describe a slow query or performance issue
+2. **Recall** — the agent searches its vector memory for similar past incidents
+3. **Sandbox** — a TiDB Cloud branch (copy-on-write snapshot of production) is created with isolated credentials
+4. **Fix & Verify** — the proposed DDL (`CREATE INDEX`, `ALTER TABLE`, etc.) is applied to the branch and benchmarked with `EXPLAIN ANALYZE`
+5. **Report** — the agent presents before/after metrics and waits for your approval before touching production
 
 **Autonomous mode** — click 🚨 Run Health Check in the sidebar:
-The agent independently runs `EXPLAIN ANALYZE` across all known hotspot queries, checks its episodic memory for past incidents, and produces a prioritised findings report — no prompting required.
+The agent independently runs `EXPLAIN ANALYZE` across all known hotspot queries, scans for write hotspots and region imbalances, checks episodic memory for past incidents, and produces a prioritised findings report — no prompting required.
 
 ---
 
@@ -25,7 +41,7 @@ The agent independently runs `EXPLAIN ANALYZE` across all known hotspot queries,
 - Python 3.10+
 - A [TiDB Cloud](https://tidbcloud.com) Serverless cluster
 - TiDB Cloud API keys (for branching)
-- An [Anthropic API key](https://console.anthropic.com)
+- An LLM API key — Anthropic, OpenAI, or Google Gemini (see [LLM Configuration](#llm-configuration))
 - The ISRG Root X1 SSL certificate ([download](https://letsencrypt.org/certs/isrgrootx1.pem))
 
 ---
@@ -61,9 +77,20 @@ TIDB_CLOUD_PRIVATE_KEY=your_private_key
 TIDB_CLOUD_PROJECT_ID=your_project_id
 TIDB_CLOUD_CLUSTER_ID=your_cluster_id
 
-# Anthropic Claude
+# ── LLM Provider (pick one) ──────────────────────────────────────
+LLM_PROVIDER=anthropic           # anthropic | openai | gemini
+
+# Anthropic Claude (default)
 ANTHROPIC_API_KEY=your-anthropic-api-key
-CLAUDE_MODEL=claude-sonnet-4-6
+CLAUDE_MODEL=claude-sonnet-4-5
+
+# OpenAI — set LLM_PROVIDER=openai to activate
+# OPENAI_API_KEY=your-openai-api-key
+# OPENAI_MODEL=gpt-4o
+
+# Google Gemini — set LLM_PROVIDER=gemini to activate
+# GOOGLE_API_KEY=your-google-api-key
+# GEMINI_MODEL=gemini-1.5-pro
 
 # Embedding model (local, no API key needed)
 EMBEDDING_MODEL=all-MiniLM-L6-v2
@@ -132,6 +159,20 @@ The `dba_episodic_memory` table is owned by TiDBVectorStore — it never appears
 
 ---
 
+## LLM Configuration
+
+The agent is **LLM-agnostic**. Set `LLM_PROVIDER` in `.env` to switch models with no code changes:
+
+| Provider | `LLM_PROVIDER` | Required env var | Default model |
+|---|---|---|---|
+| Anthropic Claude | `anthropic` | `ANTHROPIC_API_KEY` | `claude-sonnet-4-5` |
+| OpenAI | `openai` | `OPENAI_API_KEY` | `gpt-4o` |
+| Google Gemini | `gemini` | `GOOGLE_API_KEY` | `gemini-1.5-pro` |
+
+All three providers are wired through LangChain's unified chat interface. See `agent.py` → `build_agent()` for the provider selection logic.
+
+---
+
 ## Demo schema
 
 The schema (`schema.sql`) mimics a real e-commerce backend with **intentional performance issues** for the agent to find and fix:
@@ -153,10 +194,15 @@ The agent detects these via `EXPLAIN ANALYZE` and proposes targeted index additi
 | Tool | What it does |
 |---|---|
 | `explain_query` | Runs `EXPLAIN ANALYZE` on production (read-only) |
-| `create_branch` | Spawns a copy-on-write TiDB branch for safe testing |
-| `delete_branch` | Cleans up a branch after investigation |
+| `create_branch` | Spawns a copy-on-write TiDB branch with isolated credentials |
+| `list_branches` | Lists all active branches |
+| `delete_branch` | Cleans up a branch by ID |
+| `delete_branch_by_name` | Cleans up a branch by name |
 | `apply_ddl_on_branch` | Runs `CREATE INDEX` / `ALTER TABLE` on a branch only |
 | `run_query_on_branch` | Benchmarks a query on the branch post-fix |
+| `check_write_hotspots` | Detects `AUTO_INCREMENT` PKs and monotonic index risks |
+| `check_table_regions` | Inspects TiKV region distribution for write hotspots |
+| `check_slow_queries` | Queries the TiDB slow query log |
 | `recall_memory` | Semantic search over past resolved incidents |
 | `save_memory` | Persists a verified fix to the vector store |
 
@@ -167,9 +213,10 @@ The agent detects these via `EXPLAIN ANALYZE` and proposes targeted index additi
 Click **🚨 Run Health Check** in the sidebar to trigger an unprompted sweep. The agent will:
 
 1. Search episodic memory for known past incidents
-2. Run `EXPLAIN ANALYZE` on five known hotspot queries
-3. Identify full table scans and missing indexes
-4. Produce a prioritised report (HIGH / MEDIUM / LOW severity) with recommended fixes
+2. Run `EXPLAIN ANALYZE` on known hotspot queries
+3. Scan for write hotspots (`AUTO_INCREMENT`, monotonic indexes)
+4. Check TiKV region distribution for imbalanced tables
+5. Produce a prioritised report (HIGH / MEDIUM / LOW) with recommended fixes
 
 This is a read-only pass — no branches are created until you ask the agent to apply a fix.
 
@@ -183,8 +230,12 @@ Tool outputs are rendered with rich UI rather than raw JSON:
 |---|---|
 | `explain_query` | Execution time metric + index-used/full-scan badge + plan text |
 | `run_query_on_branch` | Same as above, for the post-fix measurement |
-| `recall_memory` | Past incidents rendered as an interactive table |
-| Both of the above in one turn | Plotly before/after bar chart with % improvement |
+| `recall_memory` | Past incidents as an interactive sortable table |
+| `check_write_hotspots` | Severity badge + AUTO_INCREMENT PK table + monotonic index table |
+| `check_table_regions` | Hotspot badge + region count + sortable regions dataframe |
+| `check_slow_queries` | Slow query log table with formatted timing columns |
+| `list_branches` | Branch table with per-row 🗑️ Delete button |
+| Before + after in same turn | Plotly before/after bar chart with % improvement |
 
 ---
 
@@ -330,9 +381,10 @@ SELECT
 
 ## Safety guardrails
 
-- `DROP TABLE`, `TRUNCATE`, and `DELETE FROM` are blocked on all branch connections
-- DDL against the production host is refused at the tool level
-- No fix is applied to production without explicit user approval
+- `DROP TABLE`, `TRUNCATE`, and `DELETE FROM` are **blocked** on all branch connections
+- DDL against the production host is **refused** at the tool level by comparing user prefixes
+- Branch root passwords are **generated randomly per-branch** and never reused or stored
+- No fix is applied to production **without explicit user approval**
 - PII is never printed to the chat window
 
 ---
@@ -341,14 +393,48 @@ SELECT
 
 ```
 dba_agent/
-├── agent.py          # Streamlit UI + LangGraph agent
+├── agent.py          # Streamlit UI + LangGraph agent (LLM-agnostic)
 ├── agent_context.md  # System prompt / agent identity
-├── tools.py          # LangChain tool definitions
+├── tools.py          # LangChain tool definitions (12 DBA tools)
 ├── db_manager.py     # TiDB connection + EXPLAIN utilities
-├── branch_manager.py # TiDB Cloud branching API client
+├── branch_manager.py # TiDB Cloud branching API client (v1beta1)
 ├── memory.py         # Vector store episodic memory
-├── schema.sql        # Database schema (with demo perf issues)
+├── schema.sql        # Database schema (with intentional perf issues)
 ├── seed_data.py      # Demo data loader
 ├── requirements.txt
 └── .env.example
 ```
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Streamlit UI                          │
+│              (agent.py — chat + rich renders)            │
+└────────────────────────┬────────────────────────────────┘
+                         │
+┌────────────────────────▼────────────────────────────────┐
+│              LangGraph ReAct Agent                       │
+│     Claude / GPT-4o / Gemini  ←→  12 DBA Tools          │
+└───────┬────────────────────────────────┬────────────────┘
+        │                                │
+┌───────▼───────┐              ┌─────────▼──────────────┐
+│  TiDB Cloud   │              │   TiDB Cloud Branches  │
+│  Production   │              │   (copy-on-write        │
+│  (read-only   │              │    DDL sandbox,         │
+│   explains)   │              │    per-branch password) │
+└───────┬───────┘              └────────────────────────┘
+        │
+┌───────▼───────────────────────────────────────────────┐
+│   TiDB Vector Store  (episodic memory)                │
+│   Sentence-transformers embeddings (local, no API)    │
+└───────────────────────────────────────────────────────┘
+```
+
+---
+
+## Contributing
+
+PRs welcome. The codebase is intentionally minimal — one file per concern, no frameworks beyond LangChain/LangGraph. The goal is a substrate you can clone, point at your own TiDB cluster, and have running in under 10 minutes.
