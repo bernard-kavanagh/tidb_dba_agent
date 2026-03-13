@@ -9,7 +9,9 @@ Available tools:
   - run_query_on_branch    → SELECT on a live branch connection
   - apply_ddl_on_branch    → CREATE INDEX / ALTER TABLE on branch only
   - create_branch          → Spin up a TiDB Cloud branch
-  - delete_branch          → Tear down a TiDB Cloud branch
+  - list_branches          → Show all branches with name, ID, and state
+  - delete_branch          → Tear down a TiDB Cloud branch by ID
+  - delete_branch_by_name  → Tear down a TiDB Cloud branch by display name
   - recall_memory          → Semantic search for past fixes
   - save_memory            → Persist a resolved incident
 """
@@ -151,13 +153,32 @@ def create_branch(branch_name: str) -> str:
 
 
 @tool
+def list_branches() -> str:
+    """
+    Lists all TiDB Cloud branches on the cluster, including their name, ID,
+    and current state. Use this to see what branches exist before deleting,
+    or to audit branch hygiene after an investigation.
+
+    Returns:
+        JSON list of branches with keys: branch_id, name, state, created_at.
+    """
+    try:
+        branches = _branch_manager.list_branches()
+        if not branches:
+            return json.dumps({"message": "No branches found.", "branches": []})
+        return json.dumps({"count": len(branches), "branches": branches})
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+@tool
 def delete_branch(branch_id: str) -> str:
     """
     Deletes a TiDB Cloud branch by its ID. Call this after your investigation
     is complete — whether the fix is approved for production or discarded.
 
     Args:
-        branch_id: The branch ID returned by create_branch.
+        branch_id: The branch ID returned by create_branch or list_branches.
 
     Returns:
         JSON with keys: success (bool), message.
@@ -167,6 +188,209 @@ def delete_branch(branch_id: str) -> str:
         return json.dumps({"success": ok, "message": f"Branch {branch_id} deleted." if ok else "Deletion failed."})
     except Exception as e:
         return json.dumps({"success": False, "error": str(e)})
+
+
+@tool
+def delete_branch_by_name(branch_name: str) -> str:
+    """
+    Deletes a TiDB Cloud branch by its display name — useful when you know the
+    name but not the internal ID (e.g. from the TiDB Cloud UI). Looks up the
+    branch ID automatically, then deletes it. Fails safely if the name is
+    ambiguous or not found.
+
+    Args:
+        branch_name: The exact display name of the branch, e.g. 'fix-orders-slow-query-101'.
+
+    Returns:
+        JSON with keys: success (bool), message, branch_id (on success).
+    """
+    try:
+        result = _branch_manager.delete_branch_by_name(branch_name)
+        return json.dumps(result)
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)})
+
+
+# ── Hotspot detection ─────────────────────────────────────────────────────────
+
+@tool
+def check_write_hotspots() -> str:
+    """
+    Scans all user tables for write hotspot risks:
+      1. AUTO_INCREMENT primary keys — all inserts hit the same TiKV region leader.
+         Fix: switch to AUTO_RANDOM or UUID.
+      2. Monotonically increasing indexed columns (created_at, updated_at, etc.) —
+         index region splits lag behind write throughput, causing an index hotspot.
+
+    Returns:
+        JSON with keys: severity, auto_increment_pks, monotonic_indexes, summary, fix.
+    """
+    ai_query = """
+        SELECT c.TABLE_SCHEMA, c.TABLE_NAME, c.COLUMN_NAME, c.DATA_TYPE
+        FROM INFORMATION_SCHEMA.COLUMNS c
+        WHERE c.EXTRA LIKE '%auto_increment%'
+          AND c.COLUMN_KEY = 'PRI'
+          AND c.TABLE_SCHEMA NOT IN (
+              'information_schema', 'mysql', 'performance_schema',
+              'sys', 'metrics_schema'
+          )
+        ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME
+    """
+    mono_query = """
+        SELECT TABLE_SCHEMA, TABLE_NAME, INDEX_NAME, COLUMN_NAME
+        FROM INFORMATION_SCHEMA.STATISTICS
+        WHERE COLUMN_NAME IN (
+            'created_at', 'updated_at', 'timestamp', 'create_time',
+            'update_time', 'event_time', 'inserted_at', 'created_date'
+        )
+          AND TABLE_SCHEMA NOT IN (
+              'information_schema', 'mysql', 'performance_schema',
+              'sys', 'metrics_schema'
+          )
+          AND SEQ_IN_INDEX = 1
+        ORDER BY TABLE_SCHEMA, TABLE_NAME, INDEX_NAME
+    """
+    ai_pks = db_manager.execute(ai_query)
+    mono_indexes = db_manager.execute(mono_query)
+
+    if isinstance(ai_pks, dict) and "error" in ai_pks:
+        return json.dumps({"error": f"AUTO_INCREMENT check failed: {ai_pks['error']}"})
+    if isinstance(mono_indexes, dict) and "error" in mono_indexes:
+        return json.dumps({"error": f"Monotonic index check failed: {mono_indexes['error']}"})
+
+    ai_pks = ai_pks or []
+    mono_indexes = mono_indexes or []
+    severity = "HIGH" if ai_pks else ("MEDIUM" if mono_indexes else "LOW")
+
+    return json.dumps({
+        "severity": severity,
+        "auto_increment_pks": ai_pks,
+        "monotonic_indexes": mono_indexes,
+        "summary": (
+            f"Found {len(ai_pks)} table(s) with AUTO_INCREMENT PK (HIGH — write hotspot). "
+            f"Found {len(mono_indexes)} monotonically increasing indexed column(s) (MEDIUM — index hotspot)."
+        ),
+        "fix": "Replace AUTO_INCREMENT with AUTO_RANDOM to distribute writes evenly across TiKV regions.",
+    })
+
+
+@tool
+def check_table_regions(table_name: str) -> str:
+    """
+    Inspects TiKV region distribution for a specific table using SHOW TABLE REGIONS.
+    Reveals whether data is spread evenly or concentrated in a hotspot region.
+    A single region holding >80% of writes is a clear hotspot signal.
+
+    Args:
+        table_name: Name of the table to inspect, e.g. 'orders'.
+
+    Returns:
+        JSON with keys: table, region_count, hotspot_detected, total_written_bytes,
+        regions (list), summary.
+    """
+    # Basic validation — table names are identifiers, not user-supplied strings
+    safe_name = "".join(c for c in table_name if c.isalnum() or c in ("_", "-"))
+    if safe_name != table_name:
+        return json.dumps({"error": f"Invalid table name: '{table_name}'"})
+
+    rows = db_manager.execute(f"SHOW TABLE `{safe_name}` REGIONS")
+
+    if isinstance(rows, dict) and "error" in rows:
+        return json.dumps({"error": rows["error"]})
+    if not rows:
+        return json.dumps({"error": f"No region data returned for table '{table_name}'"})
+
+    total_written = sum(r.get("WRITTEN_BYTES", 0) for r in rows)
+    max_written = max((r.get("WRITTEN_BYTES", 0) for r in rows), default=0)
+    hotspot_detected = (
+        len(rows) > 1
+        and total_written > 0
+        and (max_written / total_written) > 0.8
+    )
+
+    regions = [
+        {
+            "region_id": r.get("REGION_ID"),
+            "leader_store_id": r.get("LEADER_STORE_ID"),
+            "written_bytes": r.get("WRITTEN_BYTES", 0),
+            "read_bytes": r.get("READ_BYTES", 0),
+            # Column name varies slightly across TiDB versions
+            "approximate_size_mb": r.get("APPROXIMATE_SIZE(MB)", r.get("APPROXIMATE_SIZE", 0)),
+            "approximate_keys": r.get("APPROXIMATE_KEYS", 0),
+        }
+        for r in rows
+    ]
+
+    return json.dumps({
+        "table": table_name,
+        "region_count": len(rows),
+        "hotspot_detected": hotspot_detected,
+        "total_written_bytes": total_written,
+        "regions": regions[:30],  # trim for context window
+        "summary": (
+            f"Table '{table_name}' has {len(rows)} region(s). "
+            + ("⚠️ Hotspot detected — one region holds >80% of total writes."
+               if hotspot_detected
+               else "✅ Write distribution looks even across regions.")
+        ),
+    })
+
+
+@tool
+def check_slow_queries(min_seconds: float = 1.0, limit: int = 10) -> str:
+    """
+    Queries the TiDB slow query log for recent queries exceeding the time threshold.
+    Identifies which queries and tables are causing the most latency right now.
+
+    Args:
+        min_seconds: Minimum query time in seconds to include (default: 1.0).
+        limit: Maximum number of results to return (default: 10).
+
+    Returns:
+        JSON with keys: count, threshold_seconds, slow_queries (list with
+        query_time_s, db, query, rows_examined, index_names, user, start_time).
+    """
+    rows = db_manager.execute(f"""
+        SELECT
+            Query_time,
+            DB,
+            LEFT(Query, 300) AS Query,
+            Rows_examined,
+            Index_names,
+            User,
+            Start_time
+        FROM INFORMATION_SCHEMA.SLOW_QUERY
+        WHERE Query_time >= {float(min_seconds)}
+          AND Is_internal = 0
+        ORDER BY Query_time DESC
+        LIMIT {int(limit)}
+    """)
+
+    if isinstance(rows, dict) and "error" in rows:
+        return json.dumps({"error": rows["error"]})
+
+    if not rows:
+        return json.dumps({
+            "message": f"No slow queries found exceeding {min_seconds}s.",
+            "slow_queries": [],
+        })
+
+    return json.dumps({
+        "count": len(rows),
+        "threshold_seconds": min_seconds,
+        "slow_queries": [
+            {
+                "query_time_s": float(r.get("Query_time", 0)),
+                "db": r.get("DB", ""),
+                "query": r.get("Query", ""),
+                "rows_examined": r.get("Rows_examined", 0),
+                "index_names": r.get("Index_names", ""),
+                "user": r.get("User", ""),
+                "start_time": str(r.get("Start_time", "")),
+            }
+            for r in rows
+        ],
+    }, default=str)
 
 
 # ── Episodic memory ───────────────────────────────────────────────────────────
@@ -244,7 +468,12 @@ ALL_TOOLS = [
     run_query_on_branch,
     apply_ddl_on_branch,
     create_branch,
+    list_branches,
     delete_branch,
+    delete_branch_by_name,
+    check_write_hotspots,
+    check_table_regions,
+    check_slow_queries,
     recall_memory,
     save_memory,
 ]
