@@ -10,6 +10,7 @@ Uses: HuggingFaceEmbeddings('all-MiniLM-L6-v2') → 384-dim vectors
 
 import os
 import json
+import uuid
 from dotenv import load_dotenv
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import TiDBVectorStore
@@ -114,6 +115,7 @@ class DBAMemory:
         table_affected: str = "",
         query_affected: str = "",
         error_details: str = "",
+        branch_name: str = "",
     ) -> bool:
         """
         Saves a new incident resolution to episodic memory.
@@ -137,10 +139,32 @@ class DBAMemory:
             vs = _get_vectorstore()
             vs.add_texts(texts=[text], metadatas=[metadata])
             print(f"💾 Memory saved: {incident_summary[:60]}...")
-            return True
         except Exception as e:
             print(f"❌ Memory save failed: {e}")
             return False
+
+        # ── Write to incident_log ─────────────────────────────────────────────
+        try:
+            incident_id = str(uuid.uuid4())
+            step_detail = (
+                f"{resolution_description}\n\nSQL: {resolution_sql}\n\n"
+                f"Before: {before_time_ms}ms → After: {after_time_ms}ms | "
+                f"Table: {table_affected} | Rating: {success_rating}"
+            ).strip()
+            db_manager.execute(
+                """
+                INSERT INTO incident_log (incident_id, step_name, step_detail, branch_name)
+                VALUES (%s, %s, %s, %s)
+                """,
+                params=(incident_id, resolution_type, step_detail, branch_name or None),
+                fetch_all=False,
+            )
+            print(f"📋 Incident logged: {incident_id} ({resolution_type})")
+        except Exception as e:
+            # Non-fatal — episodic memory already saved successfully
+            print(f"⚠️  incident_log write failed (non-fatal): {e}")
+
+        return True
 
     # ── List all (for admin UI) ───────────────────────────────────────────────
 

@@ -426,9 +426,11 @@ def save_memory(
     after_time_ms: int,
     table_affected: str,
     success_rating: float,
+    branch_name: str = "",
 ) -> str:
     """
-    Saves a completed incident resolution to the DBA episodic memory vector store.
+    Saves a completed incident resolution to the DBA episodic memory vector store
+    AND writes a row to the incident_log table for SQL-queryable audit history.
     Call this AFTER a fix has been verified on the branch and approved for production.
     This builds the agent's institutional knowledge over time.
 
@@ -441,6 +443,7 @@ def save_memory(
         after_time_ms: Query execution time after the fix (ms).
         table_affected: The primary table involved.
         success_rating: Float 0–1 indicating how well the fix worked (1.0 = perfect).
+        branch_name: Name of the branch used for validation (optional but recommended).
 
     Returns:
         JSON with keys: success (bool), message.
@@ -454,6 +457,7 @@ def save_memory(
         before_time_ms=before_time_ms,
         after_time_ms=after_time_ms,
         table_affected=table_affected,
+        branch_name=branch_name,
     )
     return json.dumps({
         "success": ok,
