@@ -298,6 +298,7 @@ with st.sidebar:
         "🐢 check_slow_queries":     "Query the slow query log",
         "🧠 recall_memory":          "Search past incidents",
         "💾 save_memory":            "Persist resolved fixes",
+        "🗄️ show_databases":         "List all databases on the cluster",
     }
     for name, desc in tool_names.items():
         st.markdown(f"**{name}** — {desc}")

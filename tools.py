@@ -14,6 +14,7 @@ Available tools:
   - delete_branch_by_name  → Tear down a TiDB Cloud branch by display name
   - recall_memory          → Semantic search for past fixes
   - save_memory            → Persist a resolved incident
+  - show_databases         → List all databases on the active cluster
 """
 
 import json
@@ -465,6 +466,22 @@ def save_memory(
     })
 
 
+@tool
+def show_databases() -> str:
+    """
+    Returns a list of all databases (schemas) on the active production cluster.
+    Use this to discover what databases exist before running queries or diagnostics.
+
+    Returns:
+        JSON string with key: databases (list of database names).
+    """
+    rows = db_manager.execute("SHOW DATABASES")
+    if isinstance(rows, dict) and "error" in rows:
+        return json.dumps({"error": rows["error"]})
+    databases = [list(row.values())[0] for row in rows]
+    return json.dumps({"databases": databases})
+
+
 # ── Exported list (consumed by agent.py) ─────────────────────────────────────
 
 ALL_TOOLS = [
@@ -480,4 +497,5 @@ ALL_TOOLS = [
     check_slow_queries,
     recall_memory,
     save_memory,
+    show_databases,
 ]
