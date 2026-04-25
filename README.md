@@ -2,6 +2,8 @@
 
 > *"The database that fixes itself — safely, transparently, and with your approval."*
 
+**Part of the [cognitive foundation](https://github.com/bernard-kavanagh) portfolio** — demonstrating **procedural memory** and safe autonomous remediation on a unified TiDB data substrate. This repo proves that a cognitive foundation allows an agent to "practice" in a forked environment before committing knowledge to the substrate, solving the **Memory Wall** for database operations.
+
 An autonomous DBA agent that detects performance degradation, proposes and validates fixes in an isolated sandbox, and waits for your sign-off before touching production. Every action is explainable. Every fix is reversible. LLM-agnostic.
 
 Built with **Claude / OpenAI / Gemini** · **LangGraph** · **Streamlit** · **TiDB Cloud** · **Plotly**
@@ -20,6 +22,38 @@ The **substrate** is the combination of:
 
 Together they form a system that continuously monitors itself, proposes targeted structural improvements, benchmarks them safely, and self-heals — without ever modifying production until a human says yes.
 
+### Three-Tier Memory in the DBA Agent
+
+This agent implements all three tiers of the cognitive foundation's memory architecture:
+
+**Episodic Memory** (`dba_episodic_memory` via TiDB Vector Store): Every past incident — slow queries detected, indexes proposed, fixes applied — is stored with vector embeddings. The agent recalls similar past incidents via semantic search before forming new hypotheses.
+
+**Procedural Memory** (branching + RCA logic): The agent's learned workflow for safe remediation: observe → hypothesise → branch → apply fix in sandbox → benchmark with EXPLAIN ANALYZE → present results → wait for human approval. This procedure is the 'playbook' that improves with each incident.
+
+**Semantic Memory** (implicit, planned for explicit implementation): Patterns confirmed across multiple incidents — e.g., 'write-heavy tables with UUID primary keys consistently benefit from AUTO_RANDOM' — are currently stored as episodic records. The cognitive foundation project will promote these to an explicit semantic memory tier with scoping and lifecycle management.
+
+### Custodial Duties
+
+The DBA agent implements three of the five custodial duties defined by the cognitive foundation:
+
+- **Write Control**: Only validated investigation outcomes are persisted to episodic memory. The agent's intermediate reasoning (tool calls, failed hypotheses) stays ephemeral in the conversation context.
+- **Deduplication**: Vector similarity search prevents duplicate incident records — if a new incident is semantically identical to a recent one, the agent references the existing record rather than creating a duplicate.
+- **Human-in-the-Loop Reconciliation**: Every proposed fix is validated in a branch before touching production. The human approves or rejects, ensuring the knowledge base stays accurate.
+
+**Not yet implemented**: Confidence decay and compaction are planned for the cognitive foundation project, where episodic records that haven't been referenced in 90+ days would lose relevance weight.
+
+### Cognitive Foundation Role
+
+In the cognitive foundation portfolio, this repo serves as the **procedural memory specialist**:
+
+| Repo | Domain | Primary memory tier | Key capability |
+|---|---|---|---|
+| `tidb-self-healing-db-agent` | Database operations | **Procedural** | Safe RCA via branching |
+| `ev_charger_anomaly_detection` | Industrial IoT | **Semantic** | Fleet-wide learning at scale |
+| `tidb_fraud_detection` | Fintech / Payments | **Episodic** | Adaptive fraud detection |
+
+All three repos run on the same architectural principle: a **unified data substrate** where the agent's memory lives alongside the operational data in one ACID boundary.
+
 ---
 
 ## How it works
@@ -33,6 +67,8 @@ Together they form a system that continuously monitors itself, proposes targeted
 
 **Autonomous mode** — click 🚨 Run Health Check in the sidebar:
 The agent independently runs `EXPLAIN ANALYZE` across all known hotspot queries, scans for write hotspots and region imbalances, checks episodic memory for past incidents, and produces a prioritised findings report — no prompting required.
+
+The agent loads relevant episodic memories via vector similarity search before each reasoning step — an early form of **context assembly** that the EV charger platform later formalised as `assemble_context()` with priority-ordered sources under a hard token budget. The principle is the same: the platform decides what the model sees, not the model itself.
 
 ---
 
